@@ -1,14 +1,11 @@
 """ Code for the MAML algorithm and network definitions. """
-from __future__ import print_function
 import numpy as np
 import sys
 import tensorflow as tf
 try:
     import special_grads
 except KeyError as e:
-    print('WARN: Cannot define MaxPoolGrad, likely already defined for this version of tensorflow: %s' % e,
-          file=sys.stderr)
-
+    print 'WARN: Cannot define MaxPoolGrad, likely already defined for this version of tensorflow: %s' % e
 from tensorflow.python.platform import flags
 from utils import mse, xent, conv_block, normalize
 
@@ -84,26 +81,40 @@ class MAML:
                 if self.classification:
                     task_accuraciesb = []
 
-                task_outputa = self.forward(inputa, weights, reuse=reuse)  # only reuse on the first iter
-                task_lossa = self.loss_func(task_outputa, labela)
+                task_outputa = self.forward(inputa, weights, meta_testing=False, reuse=reuse)  # only reuse on the first iter
+                if FLAGS.no_label:
+                    task_lossa = mse(100.0*task_outputa, tf.zeros_like(task_outputa))
+                else:
+                    task_lossa = self.loss_func(task_outputa, labela)
 
                 grads = tf.gradients(task_lossa, list(weights.values()))
                 if FLAGS.stop_grad:
                     grads = [tf.stop_gradient(grad) for grad in grads]
                 gradients = dict(zip(weights.keys(), grads))
+                for key in gradients.keys():
+                    if gradients[key] is None:
+                        gradients[key] = tf.zeros_like(weights[key])
                 fast_weights = dict(zip(weights.keys(), [weights[key] - self.update_lr*gradients[key] for key in weights.keys()]))
-                output = self.forward(inputb, fast_weights, reuse=True)
+                output = self.forward(inputb, fast_weights, meta_testing=True, reuse=True)
                 task_outputbs.append(output)
                 task_lossesb.append(self.loss_func(output, labelb))
 
                 for j in range(num_updates - 1):
-                    loss = self.loss_func(self.forward(inputa, fast_weights, reuse=True), labela)
+                    task_outputa = self.forward(inputa, fast_weights, meta_testing=False, reuse=True)
+                    if FLAGS.no_label:
+                        # loss = mse(10.0*task_outputa, tf.zeros_like(task_outputa))
+                        loss = mse(100.0*task_outputa, tf.zeros_like(task_outputa))
+                    else:
+                        loss = self.loss_func(task_outputa, labela)
                     grads = tf.gradients(loss, list(fast_weights.values()))
                     if FLAGS.stop_grad:
                         grads = [tf.stop_gradient(grad) for grad in grads]
                     gradients = dict(zip(fast_weights.keys(), grads))
+                    for key in gradients.keys():
+                        if gradients[key] is None:
+                            gradients[key] = tf.zeros_like(weights[key])
                     fast_weights = dict(zip(fast_weights.keys(), [fast_weights[key] - self.update_lr*gradients[key] for key in fast_weights.keys()]))
-                    output = self.forward(inputb, fast_weights, reuse=True)
+                    output = self.forward(inputb, fast_weights, meta_testing=True, reuse=True)
                     task_outputbs.append(output)
                     task_lossesb.append(self.loss_func(output, labelb))
 
@@ -144,7 +155,7 @@ class MAML:
             if FLAGS.metatrain_iterations > 0:
                 optimizer = tf.train.AdamOptimizer(self.meta_lr)
                 self.gvs = gvs = optimizer.compute_gradients(self.total_losses2[FLAGS.num_updates-1])
-                if FLAGS.datasource == 'miniimagenet':
+                if FLAGS.datasource == 'miniimagenet' and FLAGS.clip_metagrad:
                     gvs = [(tf.clip_by_value(grad, -10, 10), var) for grad, var in gvs]
                 self.metatrain_op = optimizer.apply_gradients(gvs)
         else:
@@ -174,9 +185,32 @@ class MAML:
             weights['b'+str(i+1)] = tf.Variable(tf.zeros([self.dim_hidden[i]]))
         weights['w'+str(len(self.dim_hidden)+1)] = tf.Variable(tf.truncated_normal([self.dim_hidden[-1], self.dim_output], stddev=0.01))
         weights['b'+str(len(self.dim_hidden)+1)] = tf.Variable(tf.zeros([self.dim_output]))
+        if FLAGS.two_head:
+            in_shape = self.dim_output
+            if FLAGS.temporal_conv_2_head:
+                temporal_kernel_size = FLAGS.temporal_filter_size
+                temporal_num_filters = FLAGS.temporal_num_filters
+                num_temporal_layers = FLAGS.num_temporal_layers
+                temporal_num_filters = num_temporal_layers*[temporal_num_filters]
+                temporal_num_filters[-1] = self.dim_output
+                for j in range(len(temporal_num_filters)):
+                    if j != len(temporal_num_filters) - 1:
+                        weights['w_1d_conv_2_head_%d' % j] = tf.Variable(tf.truncated_normal([temporal_kernel_size, in_shape, temporal_num_filters[j]], stddev=0.01))
+                        weights['b_1d_conv_2_head_%d' % j] = tf.Variable(tf.zeros([temporal_num_filters[j]]))
+                        in_shape = temporal_num_filters[j]
+                    else:
+                        weights['w_1d_conv_2_head_%d' % j] = tf.Variable(tf.truncated_normal([1, in_shape, temporal_num_filters[j]], stddev=0.01))
+                        weights['b_1d_conv_2_head_%d' % j] = tf.Variable(tf.zeros([temporal_num_filters[j]]))
+            else:
+                two_head_num_fc_layers = FLAGS.two_head_num_fc_layers
+                two_head_layer_size = FLAGS.two_head_layer_size
+                two_head_dim_hidden = [two_head_layer_size]*(two_head_num_fc_layers-1) + [self.dim_output]
+                for i in range(two_head_num_fc_layers):
+                    weights['w%d_two_head' % i] = tf.Variable(tf.truncated_normal([in_shape, two_head_dim_hidden[i]], stddev=0.01))
+                    weights['b%d_two_head' % i] = tf.Variable(tf.zeros([two_head_dim_hidden[i]]))
         return weights
 
-    def forward_fc(self, inp, weights, reuse=False):
+    def forward_fc(self, inp, weights, meta_testing=False, reuse=False):
         hidden = normalize(tf.matmul(inp, weights['w1']) + weights['b1'], activation=tf.nn.relu, reuse=reuse, scope='0')
         for i in range(1,len(self.dim_hidden)):
             hidden = normalize(tf.matmul(hidden, weights['w'+str(i+1)]) + weights['b'+str(i+1)], activation=tf.nn.relu, reuse=reuse, scope=str(i+1))
@@ -205,9 +239,32 @@ class MAML:
         else:
             weights['w5'] = tf.Variable(tf.random_normal([self.dim_hidden, self.dim_output]), name='w5')
             weights['b5'] = tf.Variable(tf.zeros([self.dim_output]), name='b5')
+        if FLAGS.two_head:
+            in_shape = self.dim_output
+            if FLAGS.temporal_conv_2_head:
+                temporal_kernel_size = FLAGS.temporal_filter_size
+                temporal_num_filters = FLAGS.temporal_num_filters
+                num_temporal_layers = FLAGS.num_temporal_layers
+                temporal_num_filters = num_temporal_layers*[temporal_num_filters]
+                temporal_num_filters[-1] = self.dim_output
+                for j in range(len(temporal_num_filters)):
+                    if j != len(temporal_num_filters) - 1:
+                        weights['w_1d_conv_2_head_%d' % j] = tf.Variable(tf.truncated_normal([temporal_kernel_size, in_shape, temporal_num_filters[j]], stddev=0.01))
+                        weights['b_1d_conv_2_head_%d' % j] = tf.Variable(tf.zeros([temporal_num_filters[j]]))
+                        in_shape = temporal_num_filters[j]
+                    else:
+                        weights['w_1d_conv_2_head_%d' % j] = tf.Variable(tf.truncated_normal([1, in_shape, temporal_num_filters[j]], stddev=0.01))
+                        weights['b_1d_conv_2_head_%d' % j] = tf.Variable(tf.zeros([temporal_num_filters[j]]))
+            else:
+                two_head_num_fc_layers = FLAGS.two_head_num_fc_layers
+                two_head_layer_size = FLAGS.two_head_layer_size
+                two_head_dim_hidden = [two_head_layer_size]*(two_head_num_fc_layers-1) + [self.dim_output]
+                for i in range(two_head_num_fc_layers):
+                    weights['w%d_two_head' % i] = tf.Variable(tf.truncated_normal([in_shape, two_head_dim_hidden[i]], stddev=0.01))
+                    weights['b%d_two_head' % i] = tf.Variable(tf.zeros([two_head_dim_hidden[i]]))
         return weights
 
-    def forward_conv(self, inp, weights, reuse=False, scope=''):
+    def forward_conv(self, inp, weights, reuse=False, meta_testing=False, scope=''):
         # reuse is for the normalization parameters.
         channels = self.channels
         inp = tf.reshape(inp, [-1, self.img_size, self.img_size, channels])
@@ -221,7 +278,19 @@ class MAML:
             hidden4 = tf.reshape(hidden4, [-1, np.prod([int(dim) for dim in hidden4.get_shape()[1:]])])
         else:
             hidden4 = tf.reduce_mean(hidden4, [1, 2])
-
-        return tf.matmul(hidden4, weights['w5']) + weights['b5']
-
+        hidden4 = tf.matmul(hidden4, weights['w5']) + weights['b5']
+        if meta_testing:
+            return hidden4
+        else:
+            temporal_num_filters = FLAGS.temporal_num_filters
+            num_temporal_layers = FLAGS.num_temporal_layers
+            temporal_num_filters = num_temporal_layers*[temporal_num_filters]
+            output = tf.expand_dims(tf.nn.softmax(hidden4, dim=1), axis=0)
+            for j in range(len(temporal_num_filters)):
+                if j != len(temporal_num_filters) - 1:
+                    output = conv_block(output, weights['w_1d_conv_2_head_%d' % j], weights['b_1d_conv_2_head_%d' % j], reuse, scope+str(j+5), temporal=True)
+                else:
+                    output = tf.nn.conv1d(output, weights['w_1d_conv_2_head_%d' % j], stride=1, padding='SAME') + weights['b_1d_conv_2_head_%d' % j]
+            return tf.squeeze(output)
+                
 

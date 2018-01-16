@@ -1,0 +1,3 @@
+python main.py --datasource=miniimagenet --metatrain_iterations=60000 --meta_batch_size=4 --update_batch_size=5 --update_lr=0.01 --num_updates=5 \
+                --num_classes=5 --logdir=/z/kevin/maml_logs/miniimagenet5shot/ --num_filters=32 --max_pool=True --two_head=True --no_label=True --temporal_conv_2_head=True \
+                --temporal_filter_size=5 --temporal_num_filters=16 --num_temporal_layers=3 --clip_metagrad=True

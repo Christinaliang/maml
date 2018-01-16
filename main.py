@@ -56,6 +56,15 @@ flags.DEFINE_integer('num_filters', 64, 'number of filters for conv nets -- 32 f
 flags.DEFINE_bool('conv', True, 'whether or not to use a convolutional network, only applicable in some cases')
 flags.DEFINE_bool('max_pool', False, 'Whether or not to use max pooling rather than strided convolutions')
 flags.DEFINE_bool('stop_grad', False, 'if True, do not use second derivatives in meta-optimization (for speed)')
+flags.DEFINE_bool('two_head', False, 'if True, create two-head model')
+flags.DEFINE_bool('no_label', False, 'if True, do not provide label during preupdate')
+flags.DEFINE_bool('clip_metagrad', False, 'if True, clip meta-gradient')
+flags.DEFINE_integer('two_head_num_fc_layers', 1, 'number of fully-connected layers in the two-head architecture')
+flags.DEFINE_integer('two_head_layer_size', 100, 'hidden dimension of fully-connected layers in the two-head architecture')
+flags.DEFINE_bool('temporal_conv_2_head', False, 'whether or not to use temporal convolutions for the two-head architecture in video-only setting.')
+flags.DEFINE_integer('temporal_filter_size', 5, 'filter size for temporal convolution')
+flags.DEFINE_integer('temporal_num_filters', 64, 'number of filters for temporal convolution')
+flags.DEFINE_integer('num_temporal_layers', 3, 'number of layers for temporal convolution')
 
 ## Logging, saving, and testing options
 flags.DEFINE_bool('log', True, 'if false, do not log summaries, for debugging code.')
@@ -188,7 +197,7 @@ def test(model, saver, sess, exp_string, data_generator, test_num_updates=None):
             feed_dict = {model.inputa: inputa, model.inputb: inputb,  model.labela: labela, model.labelb: labelb, model.meta_lr: 0.0}
 
         if model.classification:
-            result = sess.run([model.metaval_total_accuracy1] + model.metaval_total_accuracies2, feed_dict)
+            result = sess.run([model.total_accuracy1] + model.total_accuracies2, feed_dict)
         else:  # this is for sinusoid
             result = sess.run([model.total_loss1] +  model.total_losses2, feed_dict)
         metaval_accuracies.append(result)
@@ -203,7 +212,7 @@ def test(model, saver, sess, exp_string, data_generator, test_num_updates=None):
 
     out_filename = FLAGS.logdir +'/'+ exp_string + '/' + 'test_ubs' + str(FLAGS.update_batch_size) + '_stepsize' + str(FLAGS.update_lr) + '.csv'
     out_pkl = FLAGS.logdir +'/'+ exp_string + '/' + 'test_ubs' + str(FLAGS.update_batch_size) + '_stepsize' + str(FLAGS.update_lr) + '.pkl'
-    with open(out_pkl, 'wb') as f:
+    with open(out_pkl, 'w') as f:
         pickle.dump({'mses': metaval_accuracies}, f)
     with open(out_filename, 'w') as f:
         writer = csv.writer(f, delimiter=',')
@@ -312,6 +321,12 @@ def main():
         exp_string += 'stopgrad'
     if FLAGS.baseline:
         exp_string += FLAGS.baseline
+    if FLAGS.two_head:
+        exp_string += '.two_head'
+    if FLAGS.temporal_conv_2_head:
+        exp_string += '._%d_%d_%dx1_1d_conv.' % (FLAGS.num_temporal_layers, FLAGS.temporal_num_filters, FLAGS.temporal_filter_size)
+    if FLAGS.clip_metagrad:
+        exp_string += 'clip_metagrad.'
     if FLAGS.norm == 'batch_norm':
         exp_string += 'batchnorm'
     elif FLAGS.norm == 'layer_norm':
